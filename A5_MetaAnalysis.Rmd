@@ -1,0 +1,258 @@
+---
+title: "Assignment 5 - Meta-analysis of pitch in schizophrenia"
+author: "Matilde Jacobsen"
+date: "6/12/2019"
+output: md_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Building on the shoulders of giants: meta-analysis
+
+## Questions to be answered
+
+1. What is the current evidence for distinctive vocal patterns in schizophrenia? Report how many papers report quantitative estimates, comment on what percentage of the overall studies reviewed they represent (see PRISMA chart) your method to analyze them, the estimated effect size of the difference (mean effect size and standard error) and forest plots representing it. N.B. Only measures of pitch mean and pitch sd are required for the assignment. Feel free to ignore the rest (although pause behavior looks interesting, if you check my article).
+
+2. Do the results match your own analysis from Assignment 3? If you add your results to the meta-analysis, do the estimated effect sizes change? Report the new estimates and the new forest plots.
+
+3. Assess the quality of the literature: report and comment on heterogeneity of the studies (tau, I2), on publication bias (funnel plot), and on influential studies.
+
+## Tips on the process to follow:
+
+- Download the data on all published articles analyzing voice in schizophrenia and the prisma chart as reference of all articles found and reviewed
+- Look through the dataset to find out which columns to use, and if there is any additional information written as comments (real world data is always messy!).
+    * Hint: PITCH_F0M and PITCH_F0SD group of variables are what you need
+    * Hint: Make sure you read the comments in the columns: `pitch_f0_variability`, `frequency`, `Title`,  `ACOUST_ANA_DESCR`, `DESCRIPTION`, and `COMMENTS`
+```{r}
+library(pacman, tidyverse)
+p_load(readxl, tidyverse, lmer, lmerTest, metafor, meta)
+
+#loading file
+xl <- read_excel("Matrix_MetaAnalysis_Diagnosis_updated290719.xlsx")
+
+#selecting relevant variables
+xl_subset <- xl %>% select(
+  StudyID, #studyID
+  DIAGNOSIS, #diagnosis
+  SAMPLE_SIZE_SZ, # n(sz)                     -> gives us the number of sz
+  SAMPLE_SIZE_HC, # n(hc)                     -> gives us the number of hc
+  # Feature 1:
+  PITCH_F0_HC_M, # mean(mean(hc_pitch))       -> gives us the mean of pitch means, for hc (group mean of means)
+  PITCH_F0_HC_SD, # sd(mean(hc_pitch))        -> gives us the variability in pitch means, for HC
+  PITCH_F0_SZ_M, # mean(mean(sz_pitch))       -> gives us the mean of pitch means, for sz (group mean of means)
+  PITCH_F0_SZ_SD, # sd(mean(sz_pitch))        -> gives us the variability in pitch means, for SZ 
+  # Feature 2:
+  PITCH_F0SD_HC_M, # mean(sd(hc_pitch))       -> gives us the mean of pitch variability, for HC
+  PITCH_F0SD_HC_SD, # sd(sd(hc_pitch))        -> gives us how pitch variability, varies for HC
+  PITCH_F0SD_SZ_M, # mean(sd(sz_pitch))       -> gives us the mean of pitch variability, for SZ
+  PITCH_F0SD_SZ_SD, # sd(sd(sz_pitch))         -> gives us how pitch variability, varies for SZ
+  TYPE_OF_TASK,
+  Article
+  )
+
+colnamelist <- c("studyID","diagnosis","n_sz","n_hc","m_m_hc","sd_m_hc","m_m_sz","sd_m_sz","m_sd_hc","sd_sd_hc","m_sd_sz","sd_sd_sz","task", "article")
+
+colnames(xl_subset) <- colnamelist
+# Above, HC is healthy controls and SZ is Schizophrenics
+# the _ means "of" in the column names
+
+#Below we check for comments to see if there is additional information we should take into account.
+comment_subset <- xl %>% select(
+  StudyID,
+  pitch_f0_variability, 
+  frequency...68, 
+  frequency...73, 
+  frequency...78, 
+  frequency...83, 
+  frequency...88,
+  Title)
+# Here we see multiple things:
+# 1. One of the Hz is in semitones, this we fix:
+xl_subset$m_m_hc <- ifelse(xl_subset$studyID == 18, NA, xl_subset$m_m_hc)
+xl_subset$m_m_sz <- ifelse(xl_subset$studyID == 18, NA, xl_subset$m_m_sz)
+
+# 2. study 15 will be overwrited with NA
+xl_subset$m_sd_hc <- ifelse(xl_subset$studyID == 15, NA, xl_subset$m_sd_hc)
+xl_subset$m_sd_sz <- ifelse(xl_subset$studyID == 15, NA, xl_subset$m_sd_sz)
+xl_subset$sd_sd_hc <- ifelse(xl_subset$studyID == 15, NA, xl_subset$sd_sd_hc)
+xl_subset$sd_sd_sz <- ifelse(xl_subset$studyID == 15, NA, xl_subset$sd_sd_sz)
+
+#task as factor
+xl_subset$task <- as.factor(xl_subset$task)
+
+```
+
+
+- Following the procedure in the slides calculate effect size and standard error of the effect size per each study. N.B. we focus on pitch mean and pitch standard deviation.
+ . first try using lmer (to connect to what you know of mixed effects models)
+ . then use rma() (to get some juicy additional statistics)
+ 
+```{r}
+xl_subset <- escalc("SMD", #"SMD" for the standardized mean difference.
+                      n1i = n_sz,
+                      n2i = n_hc,
+                      m1i = m_m_sz,
+                      m2i = m_m_hc,
+                      sd1i = sd_m_sz,
+                      sd2i = sd_m_hc,
+                      data = xl_subset)
+colnames(xl_subset)[15] <- "ES_mean"
+colnames(xl_subset)[16] <- "var_ES_mean"
+
+xl_subset <- escalc("SMD", #"SMD" for the standardized mean difference.
+                      n1i = n_sz,
+                      n2i = n_hc,
+                      m1i = m_sd_sz,
+                      m2i = m_sd_hc,
+                      sd1i = sd_sd_sz,
+                      sd2i = sd_sd_hc,
+                      data = xl_subset)
+colnames(xl_subset)[17] <- "ES_variability"
+colnames(xl_subset)[18] <- "var_ES_variability"
+
+
+#Difference of effect size / is manipulation doing a difference / baseline = level
+f1_model1 <- lmer(ES_mean ~ 1 + task + (1+task|article), #should be on article level,
+     weights = 1/var_ES_mean, #vi = sqaure of sd 
+     REML=F,
+     control = lmerControl(
+          check.nobs.vs.nlev="ignore", 
+          check.nobs.vs.nRE="ignore"),
+     data = xl_subset)
+
+summary(f1_model1)
+
+f2_model1 <- lmer(ES_variability ~ 1 + task + (1+task|article), #should be on article level,
+     weights = 1/var_ES_variability, #vi = sqaure of sd 
+     REML=F,
+     control = lmerControl(
+          check.nobs.vs.nlev="ignore", 
+          check.nobs.vs.nRE="ignore"),
+     data = xl_subset)
+
+summary(f2_model1)
+
+```
+
+- Build a forest plot of the results (forest(model))
+
+```{r}
+#Forst plot for feature 1
+f1_rma <- rma(ES_mean,var_ES_mean,data=xl_subset,slab=article)
+forest(f1_rma)
+summary(f1_rma)
+
+#Forst plot for feature 2
+f2_rma <- rma(ES_variability,var_ES_variability,data=xl_subset,slab=article)
+forest(f2_rma)
+
+#Forest plot with fixed effect
+f1_rma_fix <- rma(ES_mean,var_ES_mean,mods=cbind(task),data=xl_subset,slab=article)
+forest(f1_rma_fix)
+summary(f1_rma_fix)
+
+f2_rma_fix <- rma(ES_variability,var_ES_variability,mods=cbind(task),data=xl_subset,slab=article)
+forest(f2_rma_fix)
+summary(f2_rma_fix)
+
+?rma
+45+8+39+60+46+94+22+45+36+57 
+(13+4+12+16+23+9+6+13+16) 
+35+36+18+19+20+101+20+19+25+30 
+(13+16+10+6+45+10+12+10+15)
+452+143
+323+153
+```
+
+ 
+- Go back to Assignment 3, add your own study to the data table, and re-run meta-analysis. Do the results change?
+```{r}
+# Load non scaled data from assignment 3
+voice <- read.csv("features_unscaled.csv")
+
+# devide in subsets for hc and sz
+voice_sz <- subset(voice, Diagnosis == "1") 
+voice_hc <- subset(voice, Diagnosis == "0")
+
+# Make a new row where the right values are extracted
+new.row <- data.frame(
+  studyID=51,
+  article="Fusaroli et. al (2019)",
+  diagnosis="SZ", 
+  task = "SOCIAL", 
+  n_sz = sum(n_distinct(voice_sz$Participant)),
+  n_hc = sum(n_distinct(voice_hc$Participant)),
+  m_m_hc = mean(voice_hc$mean_pitch),
+  sd_m_hc = sd(voice_hc$mean_pitch),
+  m_m_sz = mean(voice_sz$mean_pitch),
+  sd_m_sz = sd(voice_sz$mean_pitch),
+  m_sd_hc = mean(voice_hc$sd_pitch),
+  sd_sd_hc = sd(voice_hc$sd_pitch),
+  m_sd_sz = mean(voice_sz$sd_pitch),
+  sd_sd_sz = sd(voice_sz$sd_pitch))
+
+# add escalc values for both features
+new.row <- escalc("SMD", #"SMD" for the standardized mean difference.
+                      n1i = n_sz,
+                      n2i = n_hc,
+                      m1i = m_m_sz,
+                      m2i = m_m_hc,
+                      sd1i = sd_m_sz,
+                      sd2i = sd_m_hc,
+                      data = new.row)
+colnames(new.row)[15] <- "ES_mean"
+colnames(new.row)[16] <- "var_ES_mean"
+
+new.row <- escalc("SMD", #"SMD" for the standardized mean difference.
+                      n1i = n_sz,
+                      n2i = n_hc,
+                      m1i = m_sd_sz,
+                      m2i = m_sd_hc,
+                      sd1i = sd_sd_sz,
+                      sd2i = sd_sd_hc,
+                      data = new.row)
+colnames(new.row)[17] <- "ES_variability"
+colnames(new.row)[18] <- "var_ES_variability"
+
+# Merge new row with the dataframe xl_subset
+xl_subset <- rbind(xl_subset, new.row)
+
+
+```
+
+- Now look at the output of rma() and check tau and I2
+
+```{r}
+#Forst plot for feature 1
+f1_rma_new <- rma(ES_mean,var_ES_mean,mods=cbind(task),data=xl_subset,slab=article)
+summary(f1_rma_new)
+forest(f1_rma_new)
+#Forst plot for feature 2
+f2_rma_new <- rma(ES_variability,var_ES_variability,mods=cbind(task),data=xl_subset,slab=article)
+forest(f2_rma_new)
+summary(f2_rma_new)
+
+#Funnel plots
+funnel(f1_rma_new, main = "Funnel plot feature 1", xlab = "Standardized Mean Difference")
+
+funnel(f2_rma_new, main = "Funnel plot feature 2", xlab = "Standardized Mean Difference")
+
+```
+
+- Checking for influential studies
+```{r}
+#Checking for influential data points for feature 1
+inf_1 <- influence(f1_rma_new)
+print(inf_1)
+plot(inf_1)
+#Checking for influential data points for feature 2
+inf_2 <- influence(f2_rma_new)
+print(inf_2)
+plot(inf_2)
+
+```
+
